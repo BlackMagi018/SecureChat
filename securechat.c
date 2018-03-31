@@ -6,14 +6,13 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/select.h>
+
 #include <openssl/conf.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
-
-#define KEYBITS 2048
 
 void handleErrors(void)
 {
@@ -90,19 +89,24 @@ int decrypt(unsigned char *ciphertext, int ciphertext_len, unsigned char *key,
 }
 
 int main(int argc, char** argv){
+    //Crypto Setup
+    //unsigned char *pubfilename = "RSApub.pem";
+    unsigned char key[32];
+    unsigned char iv[16];
     ERR_load_crypto_strings();
     OpenSSL_add_all_algorithms();
     OPENSSL_config(NULL);
-    int encryption = 0;
-    int sockfd = socket(AF_INET,SOCK_STREAM,0);
-    unsigned char key[32];
-    unsigned char iv[16];
+    RAND_bytes(key,32);
+    EVP_PKEY * pubkey;
+    //FILE* pubf = fopen(pubfilename,"rb");
+    //pubkey = PEM_read_PUBKEY(pubf,NULL,NULL,NULL);
     unsigned char encrypted_key[256];
-    //RAND_bytes(key,32);
-    strcpy(key,"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345");
-    //RAND_pseudo_bytes(iv,16);
-    strcpy(iv,"1234567812345678");
-    unsigned char data[5000];
+    int encryptedkey_len;
+    int encryption = 0;
+
+    int sockfd = socket(AF_INET,SOCK_STREAM,0);
+    char data[5000];
+    char encrypt_data[5000];
     fd_set sockets;
     FD_ZERO(&sockets);
     if(sockfd<0){
@@ -111,23 +115,17 @@ int main(int argc, char** argv){
     }
     struct sockaddr_in serveraddr;
     serveraddr.sin_family=AF_INET;
-
-
-
-    serveraddr.sin_port=htons(9989);
-
-
-
-
+    serveraddr.sin_port=htons(9960);
     serveraddr.sin_addr.s_addr=inet_addr("127.0.0.1");
     int e = connect(sockfd,(struct sockaddr*)&serveraddr,sizeof(serveraddr));
+
     if(e<0){
         printf("There was an error connecting\n");
         return 1;
     }
-    
+
     //Received server public key
-    EVP_PKEY *serverkey;
+    //EVP_PKEY *serverkey;
     size_t filesize = recv(sockfd,data,5000,0);
     if(filesize <= 0){
       printf("server key not received program not safe terminating");
@@ -137,11 +135,13 @@ int main(int argc, char** argv){
     fwrite(data,1,filesize,fp);
     fclose(fp);
     fp = fopen("RSApub.pem","rb");
-    serverkey = PEM_read_PUBKEY(fp,NULL,NULL,NULL);
+    pubkey = PEM_read_PUBKEY(fp,NULL,NULL,NULL);
     fclose(fp);
     }
-    int encryptedkey_len = rsa_encrypt(key,32,serverkey,encrypted_key);  
+    encryptedkey_len = rsa_encrypt(key,32,pubkey,encrypted_key);
+    //printf("Encrypted Key Len: \n%d\n",encryptedkey_len);  
     memset(data,0,5000);
+
 
     FD_SET(STDIN_FILENO,&sockets);
     FD_SET(sockfd,&sockets);
@@ -154,63 +154,77 @@ int main(int argc, char** argv){
     printf("3 - Get Client List        Format: 3                       \n");
     printf("4 - Set Username           Format: 4User#                  \n");
     printf("5 - Kick a User            Format: 5User#                  \n");
-    printf("9 - Enable Encryption      Format: 9                       \n");
+    printf("9 - Toggle Encryption      Format: 9                  \n\n");
 
     while(1){
         fd_set temp_set = sockets;
         select(FD_SETSIZE,&temp_set,NULL,NULL,NULL);
         if(FD_ISSET(STDIN_FILENO,&temp_set)){
             memset(data,0,5000);
-            if(read(0,data,5000)!=-1){
-                printf("\nSend to server: %s\n", data);
-	      send(sockfd,data,5000,0);
-                if(strcmp(data,"0\n")==0){
-		send(sockfd,data,5000,0);
+            if(read(STDIN_FILENO,data,5000)!=-1){
+		  if(data[0] == '0'){
+			send(sockfd,data,5000,0);
                     printf("Disconnecting....\n\tExit\n");
                     close(STDIN_FILENO);
                     FD_CLR(STDIN_FILENO,&sockets);
                     exit(0);
                 }
-                if(strcmp(data,"9\n")==0){
-		memset(data,0,5000);
-		char type = '9';
-		memcpy(data,&type,1);
-		memcpy(data+1,&encryptedkey_len,sizeof(int));
-		memcpy(data+5,encrypted_key,encryptedkey_len);
-                    send(sockfd,data,5000,0);
-		encryption = 1;
-                } else {
-		if(encryption){
-	      	char data_temp[5000];
-	      	int data_len = encrypt (data,strlen ((char *)data_temp),key,iv,data_temp);
-                	memset(data,0,5000);
-	      	memcpy(data,iv,16);
-		memcpy(data+16,&data_len,sizeof(int));
-	      	memcpy(data+20,data_temp,data_len);
-		data[20+data_len] = '\0';
-		printf("Data_len: %d\n",data_len);
-		}
+		  if(data[0] == '9'){
+		  	encrypt_data[0] = '9';
+		  	char temp[4];
+		  	sprintf(temp,"%d",encryptedkey_len);
+		  	memcpy(encrypt_data+1,temp,4);
+		  	memcpy(encrypt_data+5,encrypted_key,encryptedkey_len);
+		  	memset(data,0,5000);
+		  	memcpy(data,encrypt_data,5000);
+		  	printf("%s\n",data);
+		  	encryption = 1;
+		  } else {
+			printf("\nSend to server: %s\n", data);
+			if(encryption){
+			printf("Encrypting Message\n");
+			char ciphertext[1024];
+			RAND_pseudo_bytes(iv,16);
+			int ciphertext_len = encrypt (data, strlen(data), key, iv,ciphertext);
+			memset(data,0,5000);
+			memcpy(data,iv,16);
+			char temp[4];
+			sprintf(temp,"%d",ciphertext_len);
+			memcpy(data+16,temp,sizeof(temp));
+			memcpy(data+20,ciphertext,ciphertext_len);
+			 }
+		  }
                 	send(sockfd,data,5000,0);
-		memset(data,0,5000);
-	      }
-            } else {
+			memset(data,0,5000);
+            }else{
                 close(STDIN_FILENO);
                 FD_CLR(STDIN_FILENO,&sockets);
                 continue;
             }
         }else{
-            char chatRecv[5000];
-            recv(sockfd,chatRecv,5000,0);
-            if(strcmp(chatRecv,"KICKED") == 0){
+            	char chatRecv[5000];
+		if(encryption){
+			printf("Decrypting Response\n");
+			char ciphertext [1024];
+			char temp[4];
+			int ciphertext_len;
+			memcpy(iv,data,sizeof(iv));
+			memcpy(temp,data+16,sizeof(temp));
+			ciphertext_len = (int) strtol(temp,NULL,10);
+			memcpy(ciphertext,data+20,sizeof(ciphertext));
+			memset(data,0,5000);
+			int decryptedtext_len = decrypt(ciphertext, ciphertext_len, key, iv,data);
+		}
+          	recv(sockfd,chatRecv,5000,0);
+            	if(strcmp(chatRecv,"KICKED") == 0){
                 printf("You've been kicked from the chat server\n");
                 exit(0);
-            }
-            printf("\nReceive from server: %s\n",chatRecv);
-            memset(chatRecv,0,5000);
-	  
+            	}
+            	printf("\nReceive from server: %s\n",chatRecv);
+            	memset(chatRecv,0,5000);
+	     	sleep(1);
         }
 
     }
     return 0;
-	
 }
